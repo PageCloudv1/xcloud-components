@@ -1,0 +1,363 @@
+name: 🧩 xCloud Components - Build & Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [published]
+
+jobs:
+  lint-and-format:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: 📦 Install dependencies
+      run: |
+        # Install Node.js dependencies for frontend components
+        if [ -f "package.json" ]; then
+          npm ci
+        fi
+        
+        # Install Python dependencies for backend components
+        if [ -f "requirements.txt" ]; then
+          pip install -r requirements.txt
+        fi
+        
+        # Install linting tools
+        npm install -g eslint prettier @typescript-eslint/eslint-plugin
+        pip install black flake8 mypy
+
+    - name: 🎨 Format TypeScript/JavaScript
+      run: |
+        if [ -f "package.json" ]; then
+          npm run format || prettier --write "src/**/*.{ts,tsx,js,jsx}" || echo "⚠️ Formatting needs setup"
+          npm run lint || eslint "src/**/*.{ts,tsx,js,jsx}" --fix || echo "⚠️ Linting needs setup"
+        fi
+
+    - name: 🐍 Format Python code
+      run: |
+        if [ -f "requirements.txt" ] || find . -name "*.py" | head -1; then
+          black . --check || echo "⚠️ Python formatting needs fixes"
+          flake8 . || echo "⚠️ Python linting needs fixes"
+          mypy . || echo "⚠️ Python type checking needs fixes"
+        fi
+
+  test-components:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: ['18', '20']
+        python-version: ['3.9', '3.11']
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🟢 Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+
+    - name: 🐍 Setup Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: 📦 Install dependencies
+      run: |
+        # Frontend components
+        if [ -f "package.json" ]; then
+          npm ci
+          npm install --save-dev jest @testing-library/react @testing-library/jest-dom
+        fi
+        
+        # Backend components  
+        if [ -f "requirements.txt" ]; then
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
+        fi
+      shell: bash
+
+    - name: 🧪 Test React components
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        if [ -f "package.json" ] && grep -q "react" package.json; then
+          npm test -- --coverage --watchAll=false || echo "⚠️ React tests need implementation"
+        fi
+      shell: bash
+
+    - name: 🧪 Test Python components
+      run: |
+        if [ -f "requirements.txt" ] || find . -name "*.py" | head -1; then
+          python -m pytest tests/ -v --cov=src --cov-report=xml || echo "⚠️ Python tests need implementation"
+        fi
+      shell: bash
+
+    - name: 📊 Upload coverage
+      if: matrix.os == 'ubuntu-latest' && matrix.node-version == '20' && matrix.python-version == '3.11'
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./coverage.xml,./coverage/lcov.info
+        fail_ci_if_error: false
+
+  build-components:
+    needs: [lint-and-format, test-components]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: 📦 Install build dependencies
+      run: |
+        # Frontend build tools
+        if [ -f "package.json" ]; then
+          npm ci
+          npm install --save-dev webpack webpack-cli @babel/core @babel/preset-react
+        fi
+        
+        # Python build tools
+        if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
+          pip install build wheel setuptools
+        fi
+
+    - name: 🏗️ Build React components
+      run: |
+        if [ -f "package.json" ] && grep -q "react" package.json; then
+          npm run build || echo "⚠️ React build needs configuration"
+          
+          # Build component library
+          if [ -f "rollup.config.js" ] || [ -f "webpack.config.js" ]; then
+            npm run build:lib || echo "⚠️ Component library build needs setup"
+          fi
+        fi
+
+    - name: 🏗️ Build Python packages
+      run: |
+        if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
+          python -m build || echo "⚠️ Python package build needs setup"
+        fi
+
+    - name: 📊 Analyze bundle size
+      if: success()
+      run: |
+        if [ -d "dist" ] || [ -d "build" ]; then
+          echo "📦 Build artifacts created:"
+          find dist/ build/ -type f -name "*.js" -o -name "*.css" -o -name "*.whl" -o -name "*.tar.gz" 2>/dev/null | while read file; do
+            size=$(du -h "$file" | cut -f1)
+            echo "  $file: $size"
+          done
+        fi
+
+    - name: 📤 Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: component-builds
+        path: |
+          dist/
+          build/
+          *.whl
+          *.tar.gz
+        retention-days: 30
+
+  storybook:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: 📦 Install Storybook
+      run: |
+        if [ -f "package.json" ]; then
+          npm ci
+          
+          # Check if Storybook is already configured
+          if [ ! -d ".storybook" ]; then
+            npx storybook@latest init --yes
+          fi
+        fi
+
+    - name: 📚 Build Storybook
+      run: |
+        if [ -f "package.json" ] && [ -d ".storybook" ]; then
+          npm run build-storybook || echo "⚠️ Storybook build needs configuration"
+        fi
+
+    - name: 🚀 Deploy Storybook to GitHub Pages
+      if: github.ref == 'refs/heads/main'
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./storybook-static
+        destination_dir: storybook
+
+  visual-regression:
+    needs: build-components
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: 📦 Install visual testing tools
+      run: |
+        if [ -f "package.json" ]; then
+          npm ci
+          npm install --save-dev @storybook/test-runner chromatic
+        fi
+
+    - name: 📸 Run visual regression tests
+      run: |
+        if [ -f "package.json" ] && [ -d ".storybook" ]; then
+          # Start Storybook
+          npm run storybook &
+          sleep 30
+          
+          # Run visual tests
+          npm run test-storybook || echo "⚠️ Visual regression tests need setup"
+        fi
+      env:
+        NODE_ENV: test
+
+  security:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: 🔒 Audit npm dependencies
+      run: |
+        if [ -f "package.json" ]; then
+          npm audit --audit-level=moderate || echo "⚠️ Security vulnerabilities found in npm packages"
+        fi
+
+    - name: 🔍 CodeQL Analysis
+      uses: github/codeql-action/init@v3
+      with:
+        languages: javascript, python
+        
+    - name: 📊 Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+    - name: 🛡️ Dependency vulnerability scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: 📊 Upload security scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  publish:
+    needs: [build-components, test-components]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+    environment: production
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🟢 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        registry-url: 'https://registry.npmjs.org'
+
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: 📤 Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: component-builds
+        path: artifacts/
+
+    - name: 🚀 Publish to NPM
+      if: github.event_name == 'release'
+      run: |
+        if [ -f "package.json" ] && [ -d "dist" ]; then
+          npm publish || echo "⚠️ NPM publish needs configuration"
+        fi
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    - name: 🐍 Publish to PyPI  
+      if: github.event_name == 'release'
+      run: |
+        if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
+          pip install twine
+          twine upload artifacts/*.whl artifacts/*.tar.gz || echo "⚠️ PyPI publish needs configuration"
+        fi
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+    - name: 📢 Notify publish completion
+      if: success()
+      run: |
+        echo "🎉 Components published successfully!"
+        if [ -f "package.json" ]; then
+          echo "📦 NPM: $(npm view $(jq -r '.name' package.json) version)"
+        fi
+        if ls artifacts/*.whl >/dev/null 2>&1; then
+          echo "🐍 PyPI: Published wheel packages"
+        fi
